@@ -140,11 +140,43 @@ class CaptioningRNN(object):
         # Note also that you are allowed to make use of functions from layers.py   #
         # in your implementation, if needed.                                       #
         ############################################################################
-        pass
+        # Initial hidden state computation (1)
+        out_hidden_i, cache_hidden_i = affine_forward(features, W_proj, b_proj) #x, w, b
+        
+        # Vectors from captions_in (2)
+        out_embed, cache_embed = word_embedding_forward(captions_in, W_embed) #x, W
+        
+        # Hidden state vector for all timestamps (3)
+        if self.cell_type == 'rnn':
+            hidden_all, cache_all = rnn_forward(out_embed, out_hidden_i, Wx, Wh, b) #x, h0, Wx, Wh, b
+        else:
+            hidden_all, cache_all = lstm_forward(out_embed, out_hidden_i, Wx, Wh, b)
+            
+        # Score computation (4)
+        scores, cache_scores = temporal_affine_forward(hidden_all, W_vocab, b_vocab) #x, w, b
+        
+        # Softmax loss computation (5)
+        loss, loss_dx = temporal_softmax_loss(scores, captions_out, mask, verbose=False) #x, y, mask, verbose=False
+        
+        ###################### Backpropagation ######################
+        # Backpropagation through (4)
+        #print (loss_dx.shape, W_vocab.shape, loss_dx.reshape(-1, W_vocab.shape[1]).shape)
+        loss_dx, grads['W_vocab'], grads['b_vocab'] = temporal_affine_backward(loss_dx, cache_scores) 
+        
+        # Backpropagation through (3)
+        if self.cell_type == 'rnn':
+            loss_dx, dout, grads['Wx'], grads['Wh'], grads['b'] = rnn_backward(loss_dx, cache_all) #dh, cache
+        else:
+            loss_dx, dout, grads['Wx'], grads['Wh'], grads['b'] = lstm_backward(loss_dx, cache_all)
+        
+        # Backpropagation through (2)
+        grads['W_embed'] = word_embedding_backward(loss_dx, cache_embed) #dout, cache
+        
+        # Backpropagation through (1)
+        loss_dx, grads['W_proj'], grads['b_proj'] = affine_backward(dout, cache_hidden_i) #dout, cache
         ############################################################################
         #                             END OF YOUR CODE                             #
         ############################################################################
-
         return loss, grads
 
 
@@ -180,7 +212,6 @@ class CaptioningRNN(object):
         W_embed = self.params['W_embed']
         Wx, Wh, b = self.params['Wx'], self.params['Wh'], self.params['b']
         W_vocab, b_vocab = self.params['W_vocab'], self.params['b_vocab']
-
         ###########################################################################
         # TODO: Implement test-time sampling for the model. You will need to      #
         # initialize the hidden state of the RNN by applying the learned affine   #
@@ -204,8 +235,28 @@ class CaptioningRNN(object):
         #                                                                         #
         # NOTE: we are still working over minibatches in this function. Also if   #
         # you are using an LSTM, initialize the first cell state to zeros.        #
-        ###########################################################################
-        pass
+        ###########################################################################      
+        next_words_pos = self._start * (np.ones((N, 1), dtype=np.int32))
+        prev_h, cache_h = affine_forward(features, W_proj, b_proj) #x, w, b
+        prev_c = np.zeros_like(prev_h)
+        
+        for t in range(max_length):
+            # 1 - Previous word embedding using learned word embeddings
+            out_embed_vec, out_embed_cache= word_embedding_forward(next_words_pos, W_embed) #x, W
+            
+            #2 - Next hidden state computation
+            next_words = out_embed_vec.reshape(-1, Wx.shape[0])
+            if self.cell_type == 'rnn':
+                prev_h, prev_h_cache = rnn_step_forward(next_words, prev_h, Wx, Wh, b) #x, prev_h, Wx, Wh, b
+            else:
+                prev_h, prev_c, prev_h_cache = lstm_step_forward(next_words, prev_h, prev_c, Wx, Wh, b)
+            
+            #3 - Scores for all the words in the vocabulary
+            scores, cache_scores = affine_forward(prev_h, W_vocab, b_vocab)
+            
+            #4 - Cherry picking the highest score as the next word and presrving it
+            next_words_pos = np.squeeze(np.argmax(scores, axis=1))
+            captions[:, t] = next_words_pos
         ############################################################################
         #                             END OF YOUR CODE                             #
         ############################################################################
